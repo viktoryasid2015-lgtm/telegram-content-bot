@@ -360,6 +360,13 @@ def run_health_server():
             self.end_headers()
             self.wfile.write("Бот работает.".encode("utf-8"))
 
+        def do_HEAD(self):
+            # UptimeRobot и некоторые другие пинг-сервисы шлют HEAD, а не GET —
+            # без этого метода сервер отвечал 501 Not Implemented.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+
         def log_message(self, format, *args):
             pass  # не засоряем логи каждым health-check запросом
 
