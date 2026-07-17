@@ -36,6 +36,7 @@ import time
 import logging
 import threading
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytz
 import requests
@@ -343,6 +344,30 @@ def maybe_weekly_reset(ws, state: dict):
         state["last_reset_date"] = today_key
 
 
+def run_health_server():
+    """Простейший веб-сервер, отвечающий 'OK' на любой запрос.
+    Нужен только для Render.com (или похожих хостингов), которые держат
+    бесплатным исключительно 'веб-сервисы' — сервис должен отвечать на HTTP,
+    иначе платформа сочтёт его background worker и не даст бесплатный тариф.
+    Внешний пинг-сервис (например UptimeRobot) должен стучаться сюда
+    каждые ~10 минут, чтобы Render не "усыпил" бота из-за неактивности."""
+    port = int(os.environ.get("PORT", "8080"))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write("Бот работает.".encode("utf-8"))
+
+        def log_message(self, format, *args):
+            pass  # не засоряем логи каждым health-check запросом
+
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    log.info("Health-check сервер запущен на порту %s", port)
+    server.serve_forever()
+
+
 def main():
     log.info("Бот запускается. Часовой пояс: %s, интервал проверки: %s сек.",
               TIMEZONE, CHECK_INTERVAL)
@@ -354,6 +379,9 @@ def main():
 
     listener_thread = threading.Thread(target=message_listener, args=(shared_state,), daemon=True)
     listener_thread.start()
+
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
 
     while True:
         try:
