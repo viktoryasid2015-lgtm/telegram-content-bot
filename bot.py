@@ -2,14 +2,16 @@
 Telegram Content Bot
 =====================
 Раз в CHECK_INTERVAL секунд проверяет Google-таблицу.
-Если наступило время публикации (совпадает День недели + Время из таблицы
-и пост ещё не публиковался — колонка "Статус" пустая):
+Если наступило время публикации (совпадает День недели + Время из таблицы,
+время не старше LATE_WINDOW_MINUTES минут "в прошлом", и пост ещё не
+публиковался — колонка "Статус" пустая):
   1. Отправляет русский текст + картинку (колонка "Медиа") в чат "Chat ID".
   2. Переводит текст на украинский (бесплатный Google Translate).
   3. Отправляет перевод + картинку (колонка "Медиа УКР") в чат "Chat ID УКР".
   4. Записывает результат в колонку "Статус".
-Каждое воскресенье поздно вечером колонка "Статус" очищается,
-чтобы на следующей неделе тот же план публикаций повторился заново.
+Каждое воскресенье поздно вечером (запасное окно — утро понедельника, если
+бот в воскресенье был недоступен) колонка "Статус" очищается, чтобы на
+следующей неделе тот же план публикаций повторился заново.
 
 Дополнительно: бот отвечает фиксированным предупреждением, если ему написали
 в личку или тегнули (@username) в группе — на украинском, если чат где-либо
@@ -35,7 +37,7 @@ import json
 import time
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytz
@@ -56,6 +58,7 @@ SPREADSHEET_ID = os.environ["SPREADSHEET_ID"].strip()
 SHEET_NAME = os.environ.get("SHEET_NAME", "Лист1").strip()
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
 TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kiev")
+LATE_WINDOW_MINUTES = int(os.environ.get("LATE_WINDOW_MINUTES", "15"))
 GOOGLE_CREDENTIALS_JSON = os.environ["GOOGLE_CREDENTIALS_JSON"]
 
 # ---------- Автоответ на входящие сообщения ----------
@@ -293,7 +296,12 @@ def process_due_posts(ws):
         if not parsed:
             continue
         hour, minute = parsed
-        if now.hour != hour or now.minute != minute:
+        scheduled_total = hour * 60 + minute
+        now_total = now.hour * 60 + now.minute
+        # публикуем, если время наступило и прошло не больше LATE_WINDOW_MINUTES
+        # минут назад — это подстраховка на случай, если бот в нужную минуту
+        # был недоступен (например, "спал" на бесплатном хостинге)
+        if not (0 <= now_total - scheduled_total <= LATE_WINDOW_MINUTES):
             continue
         if not text_ru.strip():
             continue
@@ -330,18 +338,34 @@ def process_due_posts(ws):
 
 
 def maybe_weekly_reset(ws, state: dict):
-    """Каждое воскресенье поздно вечером очищает колонку Статус."""
+    """Очищает колонку Статус раз в неделю. Основное окно — воскресенье
+    поздно вечером, но если в этот момент бот был недоступен (например,
+    "спал" на бесплатном хостинге), есть запасное окно — утро понедельника,
+    чтобы сброс всё равно случился, просто чуть позже."""
     now = datetime.now(TZ)
-    today_key = now.strftime("%Y-%m-%d")
+    iso_weekday = now.isoweekday()  # Monday=1 ... Sunday=7
 
-    if now.weekday() == 6 and now.hour == 23 and state.get("last_reset_date") != today_key:
-        rows = ws.get_all_values()
-        n_rows = len(rows)
-        if n_rows > 1:
-            log.info("Воскресенье, %s строк — очищаю колонку Статус", n_rows - 1)
-            cell_range = f"J2:J{n_rows}"
-            ws.update(cell_range, [[""] for _ in range(n_rows - 1)])
-        state["last_reset_date"] = today_key
+    target_sunday = None
+    if iso_weekday == 7 and now.hour >= 23:
+        target_sunday = now.date()
+    elif iso_weekday == 1 and now.hour < 12:
+        target_sunday = now.date() - timedelta(days=1)
+
+    if target_sunday is None:
+        return  # сейчас не время для сброса
+
+    reset_key = target_sunday.isoformat()
+    if state.get("last_reset_date") == reset_key:
+        return  # на этой неделе уже сбрасывали
+
+    rows = ws.get_all_values()
+    n_rows = len(rows)
+    if n_rows > 1:
+        log.info("Еженедельный сброс (за неделю с воскресенья %s), %s строк — очищаю колонку Статус",
+                  reset_key, n_rows - 1)
+        cell_range = f"J2:J{n_rows}"
+        ws.update(cell_range, [[""] for _ in range(n_rows - 1)])
+    state["last_reset_date"] = reset_key
 
 
 def run_health_server():
