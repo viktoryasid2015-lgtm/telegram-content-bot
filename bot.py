@@ -25,10 +25,11 @@ C: Chat ID        (для русской версии)
 D: Thread ID      (ID темы в группе для русской версии; пусто — если тем нет)
 E: Chat ID УКР    (для украинской версии)
 F: Thread ID УКР  (ID темы в группе для украинской версии; пусто — если тем нет)
-G: Текст          (только на русском)
-H: Медиа          (ссылка на картинку/файл на Google Drive, русская версия)
-I: Медиа УКР      (ссылка на картинку/файл на Google Drive, украинская версия)
-J: Статус         (сюда бот сам пишет результат публикации)
+G: Текст          (на русском)
+H: Текст УКР      (готовый украинский текст; если пусто — бот сам переведёт из "Текст")
+I: Медиа          (ссылка на картинку/файл на Google Drive, русская версия)
+J: Медиа УКР      (ссылка на картинку/файл на Google Drive, украинская версия)
+K: Статус         (сюда бот сам пишет результат публикации)
 """
 
 import os
@@ -183,7 +184,7 @@ def collect_ukr_chat_ids(ws) -> set:
     rows = ws.get_all_values()
     ids = set()
     for row in rows[1:]:
-        row = row + [""] * (10 - len(row))
+        row = row + [""] * (11 - len(row))
         chat_id_ukr = row[4]
         for cid in parse_multi(chat_id_ukr):
             if cid:
@@ -262,12 +263,15 @@ def message_listener(shared_state: dict):
                 if frm.get("is_bot"):
                     continue  # не отвечаем другим ботам (и самим себе)
 
-                if not is_bot_addressed(msg, bot_id, bot_username):
-                    continue  # не личка, не тег и не ответ боту — пропускаем
-
                 chat = msg.get("chat", {})
                 chat_id = str(chat.get("id", ""))
                 thread_id = msg.get("message_thread_id")
+                preview = (msg.get("text") or msg.get("caption") or "")[:50]
+                log.info("Входящее сообщение: chat_id=%s, chat_title=%r, thread_id=%s, текст=%r",
+                          chat_id, chat.get("title", ""), thread_id, preview)
+
+                if not is_bot_addressed(msg, bot_id, bot_username):
+                    continue  # не личка, не тег и не ответ боту — пропускаем
 
                 text = NOTICE_UKR if chat_id in shared_state.get("ukr_chat_ids", set()) else NOTICE_RU
                 ok, info = send_telegram(chat_id, text, None, thread_id)
@@ -284,9 +288,9 @@ def process_due_posts(ws):
     today_name = WEEKDAY_NAMES[now.weekday()]
 
     for idx, row in enumerate(rows[1:], start=2):  # строки таблицы, start=2 т.к. 1 — заголовок
-        row = row + [""] * (10 - len(row))  # на случай если строка короче 10 колонок
+        row = row + [""] * (11 - len(row))  # на случай если строка короче 11 колонок
         (date_cell, time_cell, chat_id_ru, thread_id_ru, chat_id_ukr, thread_id_ukr,
-         text_ru, media_ru, media_ukr, status) = row[:10]
+         text_ru, text_ukr_manual, media_ru, media_ukr, status) = row[:11]
 
         if status.strip():
             continue  # уже опубликовано на этой неделе
@@ -318,13 +322,16 @@ def process_due_posts(ws):
         else:
             results.append("RU: пропущено (нет Chat ID)")
 
-        # --- Украинская версия (перевод, тоже может быть несколько групп) ---
+        # --- Украинская версия (готовый текст, если есть; иначе перевод) ---
         if chat_id_ukr.strip():
-            try:
-                text_ukr = GoogleTranslator(source="ru", target="uk").translate(text_ru.strip())
-            except Exception as e:
-                log.error("Ошибка перевода: %s", e)
-                text_ukr = text_ru.strip()  # если перевод не удался — публикуем как есть
+            if text_ukr_manual.strip():
+                text_ukr = text_ukr_manual.strip()
+            else:
+                try:
+                    text_ukr = GoogleTranslator(source="ru", target="uk").translate(text_ru.strip())
+                except Exception as e:
+                    log.error("Ошибка перевода: %s", e)
+                    text_ukr = text_ru.strip()  # если перевод не удался — публикуем как есть
             ukr_summaries = send_to_group_list(
                 chat_id_ukr, thread_id_ukr, text_ukr, drive_link_to_direct(media_ukr.strip())
             )
@@ -333,7 +340,7 @@ def process_due_posts(ws):
             results.append("UKR: пропущено (нет Chat ID)")
 
         status_text = f"{now.strftime('%d.%m %H:%M')} — " + "; ".join(results)
-        ws.update_cell(idx, 10, status_text)  # колонка J = Статус
+        ws.update_cell(idx, 11, status_text)  # колонка K = Статус
         log.info("Статус записан: %s", status_text)
 
 
@@ -363,7 +370,7 @@ def maybe_weekly_reset(ws, state: dict):
     if n_rows > 1:
         log.info("Еженедельный сброс (за неделю с воскресенья %s), %s строк — очищаю колонку Статус",
                   reset_key, n_rows - 1)
-        cell_range = f"J2:J{n_rows}"
+        cell_range = f"K2:K{n_rows}"
         ws.update(cell_range, [[""] for _ in range(n_rows - 1)])
     state["last_reset_date"] = reset_key
 
